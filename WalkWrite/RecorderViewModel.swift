@@ -9,6 +9,35 @@ import SwiftUI // Often needed for @MainActor and ObservableObject, though maybe
 // Import necessary types if they are not automatically available
 // import WalkWrite // Explicit import removed as it's redundant within the same module
 
+// MARK: - Recording Mode
+
+/// Defines the recording mode for the app
+public enum RecordingMode: String, Codable, CaseIterable {
+    /// Traditional recording - captures all audio
+    case traditional
+
+    /// VAD-based recording - filters out silence, keeps only speech
+    case vadFiltered
+
+    public var displayName: String {
+        switch self {
+        case .traditional:
+            return "Standard"
+        case .vadFiltered:
+            return "Smart (VAD)"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .traditional:
+            return "Records all audio including silence"
+        case .vadFiltered:
+            return "Automatically filters out silence, keeps only speech"
+        }
+    }
+}
+
 @MainActor
 final class RecorderViewModel: ObservableObject {
 
@@ -22,11 +51,23 @@ final class RecorderViewModel: ObservableObject {
     @Published private(set) var audioLevel: Float = 0.0
     @Published var transcriptionProgress: Double = 0.0 // New property for progress
 
-    // MARK: - Private
+    // MARK: - VAD-specific Published State
+    @Published var recordingMode: RecordingMode = .traditional
+    @Published private(set) var vadSpeechProbability: Float = 0.0
+    @Published private(set) var isCurrentlySpeech: Bool = false
+    @Published private(set) var speechDuration: TimeInterval = 0
+    @Published private(set) var silenceDuration: TimeInterval = 0
+    @Published private(set) var speechSegmentCount: Int = 0
+    @Published var vadConfiguration: VADConfiguration = .default
+
+    // MARK: - Private (Traditional Recording)
     private var recorder: AVAudioRecorder?
     private var accumulatedTime: TimeInterval = 0
     private var currentSegmentStartTime: Date?
     private var timer: AnyCancellable?
+
+    // MARK: - Private (VAD Recording)
+    private var continuousRecorder: ContinuousRecorder?
 
     // Weak reference to persistent store so we can immediately persist raw audio
     private weak var store: NoteStore?
@@ -36,7 +77,18 @@ final class RecorderViewModel: ObservableObject {
     }
 
     var elapsed: TimeInterval {
-        accumulatedTime + (currentSegmentStartTime.map { Date().timeIntervalSince($0) } ?? 0)
+        if recordingMode == .vadFiltered, let continuousRecorder = continuousRecorder {
+            return continuousRecorder.elapsedTime
+        }
+        return accumulatedTime + (currentSegmentStartTime.map { Date().timeIntervalSince($0) } ?? 0)
+    }
+
+    /// For VAD mode: returns the duration of speech detected so far
+    var effectiveSpeechDuration: TimeInterval {
+        if recordingMode == .vadFiltered {
+            return speechDuration
+        }
+        return elapsed
     }
 
     // MARK: - Permissions
@@ -57,6 +109,26 @@ final class RecorderViewModel: ObservableObject {
 
         // No limits in open source version - upgrade is optional
 
+        switch recordingMode {
+        case .traditional:
+            startTraditionalRecording()
+        case .vadFiltered:
+            startVADRecording()
+        }
+
+        // Pre-warm WhisperEngine in the background
+        // This will initialize the shared instance and load the model
+        // if it hasn't been done yet for this app session.
+        Task.detached(priority: .background) {
+            Foundation.NSLog("RecorderViewModel: Pre-warming WhisperEngine...")
+            _ = await WhisperEngine.shared // Access to initialize
+            Foundation.NSLog("RecorderViewModel: WhisperEngine pre-warming initiated/completed.")
+        }
+    }
+
+    // MARK: - Traditional Recording
+
+    private func startTraditionalRecording() {
 #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
@@ -84,14 +156,36 @@ final class RecorderViewModel: ObservableObject {
         isPaused = false
 
         startOrUpdateTimer()
+    }
 
-        // Pre-warm WhisperEngine in the background
-        // This will initialize the shared instance and load the model
-        // if it hasn't been done yet for this app session.
-        Task.detached(priority: .background) {
-            Foundation.NSLog("RecorderViewModel: Pre-warming WhisperEngine...")
-            _ = await WhisperEngine.shared // Access to initialize
-            Foundation.NSLog("RecorderViewModel: WhisperEngine pre-warming initiated/completed.")
+    // MARK: - VAD-based Recording
+
+    private func startVADRecording() {
+        // Create continuous recorder with current VAD configuration
+        continuousRecorder = ContinuousRecorder(
+            vadConfiguration: vadConfiguration,
+            keepFullAudio: true  // Keep full audio as fallback
+        )
+        continuousRecorder?.delegate = self
+
+        do {
+            try continuousRecorder?.startRecording()
+            isRecording = true
+            isPaused = false
+
+            // Reset VAD stats
+            vadSpeechProbability = 0.0
+            isCurrentlySpeech = false
+            speechDuration = 0
+            silenceDuration = 0
+            speechSegmentCount = 0
+
+            NSLog("RecorderViewModel: Started VAD-based recording")
+        } catch {
+            NSLog("RecorderViewModel: Failed to start VAD recording: \(error)")
+            // Fallback to traditional recording
+            recordingMode = .traditional
+            startTraditionalRecording()
         }
     }
 
@@ -129,28 +223,60 @@ final class RecorderViewModel: ObservableObject {
     }
 
     func pauseRecording() {
-        guard isRecording, !isPaused, let recorder = recorder, let segmentStartTime = currentSegmentStartTime else { return }
-        recorder.pause()
-        accumulatedTime += Date().timeIntervalSince(segmentStartTime)
-        currentSegmentStartTime = nil
+        guard isRecording, !isPaused else { return }
+
+        switch recordingMode {
+        case .traditional:
+            guard let recorder = recorder, let segmentStartTime = currentSegmentStartTime else { return }
+            recorder.pause()
+            accumulatedTime += Date().timeIntervalSince(segmentStartTime)
+            currentSegmentStartTime = nil
+
+        case .vadFiltered:
+            continuousRecorder?.pauseRecording()
+        }
+
         isPaused = true
         audioLevel = 0.0 // Reset audio level on pause
-        // Timer is not cancelled here if we want elapsed time to freeze but other UI might still update.
-        // However, for audio level, it should stop. The current timer logic handles this via !self.isPaused check.
-        // If timer is fully stopped: timer?.cancel()
+        vadSpeechProbability = 0.0
+        isCurrentlySpeech = false
         self.objectWillChange.send() // Ensure UI updates for isPaused state
     }
 
     func resumeRecording() {
-        guard isRecording, isPaused, let recorder = recorder else { return }
-        recorder.record() // AVAudioRecorder resumes with record()
-        currentSegmentStartTime = .now
+        guard isRecording, isPaused else { return }
+
+        switch recordingMode {
+        case .traditional:
+            guard let recorder = recorder else { return }
+            recorder.record() // AVAudioRecorder resumes with record()
+            currentSegmentStartTime = .now
+            startOrUpdateTimer() // Restart timer with metering
+
+        case .vadFiltered:
+            do {
+                try continuousRecorder?.resumeRecording()
+            } catch {
+                NSLog("RecorderViewModel: Failed to resume VAD recording: \(error)")
+            }
+        }
+
         isPaused = false
-        startOrUpdateTimer() // Restart timer with metering
     }
 
     func stopRecording() {
-        guard isRecording, let recorder = recorder else { return }
+        guard isRecording else { return }
+
+        switch recordingMode {
+        case .traditional:
+            stopTraditionalRecording()
+        case .vadFiltered:
+            stopVADRecording()
+        }
+    }
+
+    private func stopTraditionalRecording() {
+        guard let recorder = recorder else { return }
         audioLevel = 0.0 // Reset audio level on stop
 
         if !isPaused, let segmentStartTime = currentSegmentStartTime {
@@ -160,15 +286,53 @@ final class RecorderViewModel: ObservableObject {
 
         recorder.stop()
         timer?.cancel()
-        
+
         let duration = accumulatedTime // Use the accurately tracked accumulated time
         let audioURL = recorder.url
-        
+
         self.recorder = nil
         self.isRecording = false
         self.isPaused = false
         self.accumulatedTime = 0
 
+        processRecordedAudio(url: audioURL, duration: duration)
+    }
+
+    private func stopVADRecording() {
+        guard let continuousRecorder = continuousRecorder else {
+            isRecording = false
+            isPaused = false
+            return
+        }
+
+        // Reset UI state
+        audioLevel = 0.0
+        vadSpeechProbability = 0.0
+        isCurrentlySpeech = false
+
+        do {
+            let audioURL = try continuousRecorder.stopRecording()
+            let stats = continuousRecorder.getStats()
+
+            // Use speech duration as the effective duration for VAD mode
+            let duration = stats.speechDuration > 0 ? stats.speechDuration : stats.totalRecordingDuration
+
+            self.continuousRecorder = nil
+            self.isRecording = false
+            self.isPaused = false
+
+            NSLog("RecorderViewModel: VAD recording stopped. Speech: \(stats.speechDuration)s, Total: \(stats.totalRecordingDuration)s, Segments: \(stats.segmentCount)")
+
+            processRecordedAudio(url: audioURL, duration: duration)
+        } catch {
+            NSLog("RecorderViewModel: Failed to stop VAD recording: \(error)")
+            self.continuousRecorder = nil
+            self.isRecording = false
+            self.isPaused = false
+        }
+    }
+
+    private func processRecordedAudio(url audioURL: URL, duration: TimeInterval) {
         // Immediately persist a placeholder note so the user never loses their recording
         let placeholder = Note(createdAt: Date(), // Explicit Date()
                                duration: duration,
@@ -237,7 +401,7 @@ final class RecorderViewModel: ObservableObject {
                     // Potentially remove the placeholder if it's truly unusable or notify user
                     // For now, we'll let the placeholder be updated with empty transcript
                 }
-                
+
                 let note = Note(id: placeholderID,
                                 createdAt: Date(), // Explicit Date(), ideally original placeholder's date
                                 duration: duration,
@@ -298,4 +462,45 @@ final class RecorderViewModel: ObservableObject {
         return out
     }
     */
+}
+
+// MARK: - ContinuousRecorderDelegate
+
+extension RecorderViewModel: ContinuousRecorderDelegate {
+
+    nonisolated func continuousRecorder(_ recorder: ContinuousRecorder, didDetectSpeechSegment segment: SpeechSegment) {
+        Task { @MainActor in
+            self.speechSegmentCount += 1
+            NSLog("RecorderViewModel: Speech segment detected #\(self.speechSegmentCount): \(segment.duration)s")
+        }
+    }
+
+    nonisolated func continuousRecorder(_ recorder: ContinuousRecorder, didUpdateAudioLevel level: Float) {
+        Task { @MainActor in
+            self.audioLevel = level
+        }
+    }
+
+    nonisolated func continuousRecorder(_ recorder: ContinuousRecorder, didUpdateVADState isSpeech: Bool, probability: Float) {
+        Task { @MainActor in
+            self.vadSpeechProbability = probability
+            self.isCurrentlySpeech = isSpeech
+        }
+    }
+
+    nonisolated func continuousRecorder(_ recorder: ContinuousRecorder, didUpdateStats stats: AudioSegmentManager.RecordingStats) {
+        Task { @MainActor in
+            self.speechDuration = stats.speechDuration
+            self.silenceDuration = stats.silenceDuration
+            self.speechSegmentCount = stats.segmentCount
+            self.objectWillChange.send()
+        }
+    }
+
+    nonisolated func continuousRecorder(_ recorder: ContinuousRecorder, didEncounterError error: Error) {
+        Task { @MainActor in
+            NSLog("RecorderViewModel: ContinuousRecorder error: \(error)")
+            // Could show an alert or handle the error appropriately
+        }
+    }
 }
