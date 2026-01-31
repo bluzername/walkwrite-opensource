@@ -15,9 +15,25 @@ struct RecorderSheet: View {
     @State private var showUpgrade = false
 #endif
     @State private var showVADSettings = false
+    @State private var vadConfiguration = VADConfiguration.default
 
     var body: some View {
         VStack(spacing: 32) {
+            // Settings button (only shown before recording starts)
+            if !vm.isRecording && !vm.isProcessing && !vm.isPreparingModel {
+                HStack {
+                    Spacer()
+                    Button {
+                        showVADSettings = true
+                    } label: {
+                        Image(systemName: "gear")
+                            .font(.title2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal)
+            }
+
             // Status Text
             Group {
                 if vm.permissionDenied {
@@ -137,6 +153,9 @@ struct RecorderSheet: View {
             if newValue != nil {
                 dismiss()
             }
+        }
+        .sheet(isPresented: $showVADSettings) {
+            RecordingSettingsView(vadConfiguration: $vadConfiguration)
         }
     }
 

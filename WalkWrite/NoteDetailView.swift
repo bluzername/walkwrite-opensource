@@ -37,10 +37,19 @@ struct NoteDetailView: View {
     @State private var enhancementRequested = false
     @State private var isRetryingTranscription = false // For retry UI
     @State private var showWhisperBusyAlert = false // For retry UI
+    @State private var showDiarizedView = true // Toggle between raw and diarized transcript
 
     // MARK: – Helper flags
     private var noEnhancementsYet: Bool {
         note.cleanedTranscript == nil && note.summary == nil && note.keyIdeas == nil && note.enhancementFailed == nil
+    }
+
+    private var hasDiarization: Bool {
+        note.diarizationCompleted == true && note.diarizedWords != nil && !(note.diarizedWords?.isEmpty ?? true)
+    }
+
+    private var hasMultipleSpeakers: Bool {
+        (note.speakerCount ?? 0) > 1
     }
 
     var body: some View {
@@ -49,6 +58,14 @@ struct NoteDetailView: View {
                 transcriptTab()
                     .tabItem { Text("Transcript") }
                     .tag(0)
+
+                // Show Speakers tab only if diarization detected multiple speakers
+                if hasDiarization && hasMultipleSpeakers {
+                    speakersTab()
+                        .tabItem { Text("Speakers") }
+                        .tag(4)
+                }
+
                 cleanTab()
                     .tabItem { Text("Clean Up") }
                     .tag(1)
@@ -424,18 +441,39 @@ struct NoteDetailView: View {
     private func transcriptTab() -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Transcript")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // Header with diarization status
+                HStack {
+                    Text("Transcript")
+                        .font(.headline)
+                    Spacer()
+                    DiarizationStatusView(note: note)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text(highlightedTranscript())
-                    .textSelection(.enabled)
-                    .id(note.id)
-                    .foregroundColor(.primary)
+                // Toggle for diarized view if available
+                if hasDiarization && hasMultipleSpeakers {
+                    Toggle("Show speakers", isOn: $showDiarizedView)
+                        .font(.subheadline)
+                }
+
+                // Transcript content
+                if showDiarizedView && hasDiarization && hasMultipleSpeakers,
+                   let diarizedWords = note.diarizedWords {
+                    DiarizedTranscriptView(
+                        diarizedWords: diarizedWords,
+                        identifiedUserId: note.identifiedUserId,
+                        playbackTime: isPlaying ? playbackTime : nil
+                    )
+                } else {
+                    Text(highlightedTranscript())
+                        .textSelection(.enabled)
+                        .id(note.id)
+                        .foregroundColor(.primary)
+                }
 
                 // Retry Transcription Button
                 if note.transcript.isEmpty && !isRetryingTranscription {
-                    Button(action: retryTranscription) { // Action to be added later
+                    Button(action: retryTranscription) {
                         Label("Retry Transcription", systemImage: "arrow.clockwise.circle")
                     }
                     .buttonStyle(.bordered)
@@ -454,12 +492,85 @@ struct NoteDetailView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .frame(maxWidth: .infinity)
-                    .padding(.top, note.transcript.isEmpty ? 0 : 8) // Adjust spacing
+                    .padding(.top, note.transcript.isEmpty ? 0 : 8)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
+    }
+
+    // MARK: - Speakers Tab
+
+    @ViewBuilder
+    private func speakersTab() -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let speakerStats = note.speakerStats, !speakerStats.isEmpty {
+                    SpeakerOverview(
+                        speakerStats: speakerStats,
+                        identifiedUserId: note.identifiedUserId,
+                        totalDuration: note.duration
+                    )
+
+                    // Timeline if we have speaker segments
+                    if let segments = note.speakerSegments, !segments.isEmpty {
+                        SpeakerTimelineView(
+                            speakerSegments: segments,
+                            identifiedUserId: note.identifiedUserId,
+                            totalDuration: note.duration,
+                            currentTime: isPlaying ? playbackTime : nil
+                        )
+                    }
+
+                    // VAD stats if available
+                    if let originalDuration = note.originalRecordingDuration,
+                       let speechDuration = note.speechDuration {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Recording Stats")
+                                .font(.headline)
+
+                            HStack(spacing: 16) {
+                                StatItem(
+                                    icon: "clock",
+                                    value: formatDuration(originalDuration),
+                                    label: "Total"
+                                )
+                                StatItem(
+                                    icon: "waveform",
+                                    value: formatDuration(speechDuration),
+                                    label: "Speech"
+                                )
+                                StatItem(
+                                    icon: "percent",
+                                    value: String(format: "%.0f%%", (speechDuration / originalDuration) * 100),
+                                    label: "Efficiency"
+                                )
+                            }
+                        }
+                        .padding()
+                        .background(Color.gray.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                } else {
+                    VStack(spacing: 12) {
+                        Image(systemName: "person.2")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        Text("No speaker data available")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .padding()
+        }
+    }
+
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        let minutes = Int(duration / 60)
+        let seconds = Int(duration.truncatingRemainder(dividingBy: 60))
+        return "\(minutes):\(String(format: "%02d", seconds))"
     }
 
     @ViewBuilder

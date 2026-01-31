@@ -7,6 +7,7 @@
 | 1.0 | 2025-01-30 | Phase 1 | VAD-based continuous recording |
 | 2.0 | 2025-01-30 | Phase 2 | Speaker diarization complete |
 | 3.0 | 2025-01-31 | Phase 3 | User identification & LLM integration |
+| 4.0 | 2025-01-31 | Phase 4 | UI/UX enhancements for speaker visualization |
 
 ---
 
@@ -17,10 +18,11 @@
 3. [Phase 1: VAD Foundation](#phase-1-vad-foundation)
 4. [Phase 2: Speaker Diarization](#phase-2-speaker-diarization)
 5. [Phase 3: User Identification & LLM Integration](#phase-3-user-identification--llm-integration)
-6. [Data Flow](#data-flow)
-7. [Data Models](#data-models)
-8. [Component Reference](#component-reference)
-9. [Testing Strategy](#testing-strategy)
+6. [Phase 4: UI/UX Enhancements](#phase-4-uiux-enhancements)
+7. [Data Flow](#data-flow)
+8. [Data Models](#data-models)
+9. [Component Reference](#component-reference)
+10. [Testing Strategy](#testing-strategy)
 
 ---
 
@@ -635,6 +637,131 @@ extension Note {
 
 ---
 
+## Phase 4: UI/UX Enhancements
+
+### Overview
+
+Phase 4 adds visual components for speaker information display:
+1. Color-coded transcript view by speaker
+2. Speaker statistics and timeline views
+3. Diarization settings UI
+4. Integration with NoteDetailView
+
+### Components
+
+#### SpeakerVisualization.swift
+
+Contains all speaker visualization components:
+
+```swift
+// Speaker color palette
+public enum SpeakerColors {
+    static func color(for speakerId: Int, isUser: Bool) -> Color
+    static func backgroundColor(for speakerId: Int, isUser: Bool) -> Color
+}
+
+// Small badge showing speaker identity
+struct SpeakerBadge: View {
+    let speakerId: Int
+    let isUser: Bool
+    let label: String?
+}
+
+// Card showing statistics for a single speaker
+struct SpeakerStatsCard: View {
+    let stats: SpeakerStats
+    let isUser: Bool
+    let totalDuration: TimeInterval
+}
+
+// Overview of all speakers in a note
+struct SpeakerOverview: View {
+    let speakerStats: [SpeakerStats]
+    let identifiedUserId: Int?
+    let totalDuration: TimeInterval
+}
+
+// Visual bar showing speaker time distribution
+struct SpeakerBreakdownBar: View { ... }
+
+// Displays transcript with speaker labels and color coding
+struct DiarizedTranscriptView: View {
+    let diarizedWords: [DiarizedWord]
+    let identifiedUserId: Int?
+    let playbackTime: TimeInterval?
+}
+
+// Visual timeline showing when each speaker spoke
+struct SpeakerTimelineView: View {
+    let speakerSegments: [SpeakerSegment]
+    let identifiedUserId: Int?
+    let totalDuration: TimeInterval
+    let currentTime: TimeInterval?
+}
+
+// Shows the status of diarization processing
+struct DiarizationStatusView: View {
+    let note: Note
+}
+```
+
+#### DiarizationSettingsView.swift
+
+Settings UI for diarization options:
+
+```swift
+// User preferences for diarization
+public struct DiarizationSettings: Codable {
+    var autoRunDiarization: Bool           // Auto-run on VAD recordings
+    var autoRunSpeakerAwareEnhancement: Bool
+    var maxSpeakers: Int                   // 2-10
+    var clusteringThreshold: Float         // 0.3-0.7
+    var showSpeakerLabelsByDefault: Bool
+    var userIdentificationMethod: UserIdentificationMethod
+}
+
+// Manages persistence of settings
+public class DiarizationSettingsManager: ObservableObject {
+    static let shared: DiarizationSettingsManager
+    @Published var settings: DiarizationSettings
+}
+
+// Settings view for diarization options
+struct DiarizationSettingsView: View { ... }
+
+// Combined settings for VAD and Diarization
+struct RecordingSettingsView: View { ... }
+```
+
+### NoteDetailView Updates
+
+Added to NoteDetailView:
+- **Speakers Tab**: Shows when multiple speakers detected
+- **Diarized Transcript Toggle**: Switch between raw and speaker-labeled view
+- **Speaker Statistics**: Time, word count, segments per speaker
+- **Speaker Timeline**: Visual representation of who spoke when
+- **Diarization Status**: Processing indicator
+
+### RecorderSheet Updates
+
+- **Settings Button**: Gear icon before recording starts
+- **Recording Settings Sheet**: Combined VAD + diarization settings
+
+### File Structure (Phase 4)
+
+```
+WalkWrite/
+├── SpeakerVisualization.swift      (400 lines) - All visualization components
+├── DiarizationSettingsView.swift   (250 lines) - Settings UI
+├── NoteDetailView.swift            (Modified) - Speakers tab, diarized view
+└── RecorderSheet.swift             (Modified) - Settings button
+
+WalkWriteTests/
+└── SpeakerVisualizationTests.swift # Phase 4 UI tests (if needed)
+```
+
+---
+
 ## Data Flow
 
 ### Recording Flow (VAD Mode)
@@ -824,6 +951,25 @@ struct Note: Identifiable, Codable {
 | speakerAwareSummary | Summary with speaker context |
 | speakerAwareKeyIdeas | Key ideas attributed to speakers |
 | extractActionItems | Extract action items from conversation |
+
+### Phase 4 Components (UI/UX)
+
+| Component | File | Lines | Purpose |
+|-----------|------|-------|---------|
+| SpeakerColors | SpeakerVisualization.swift | 25 | Consistent speaker color palette |
+| SpeakerBadge | SpeakerVisualization.swift | 40 | Small speaker identity badge |
+| SpeakerStatsCard | SpeakerVisualization.swift | 60 | Speaker statistics card |
+| SpeakerOverview | SpeakerVisualization.swift | 50 | All speakers summary view |
+| SpeakerBreakdownBar | SpeakerVisualization.swift | 35 | Time distribution bar |
+| DiarizedTranscriptView | SpeakerVisualization.swift | 80 | Color-coded transcript |
+| SpeakerTurn | SpeakerVisualization.swift | 25 | Speech turn grouping |
+| SpeakerTurnView | SpeakerVisualization.swift | 50 | Single turn display |
+| DiarizationStatusView | SpeakerVisualization.swift | 30 | Processing status |
+| SpeakerTimelineView | SpeakerVisualization.swift | 60 | Visual speaker timeline |
+| DiarizationSettings | DiarizationSettingsView.swift | 30 | Settings model |
+| DiarizationSettingsManager | DiarizationSettingsView.swift | 40 | Settings persistence |
+| DiarizationSettingsView | DiarizationSettingsView.swift | 80 | Settings UI |
+| RecordingSettingsView | DiarizationSettingsView.swift | 70 | Combined VAD+diarization settings |
 
 ---
 
