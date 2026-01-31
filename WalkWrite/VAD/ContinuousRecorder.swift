@@ -281,6 +281,11 @@ public final class ContinuousRecorder: @unchecked Sendable {
         return segmentManager.getTimeMappings()
     }
 
+    /// Get speech segments for note metadata
+    public func getSpeechSegments() -> [SpeechSegment] {
+        return segmentManager.getSpeechSegments()
+    }
+
     /// Update VAD configuration
     public func updateVADConfiguration(_ config: VADConfiguration) {
         lock.lock()

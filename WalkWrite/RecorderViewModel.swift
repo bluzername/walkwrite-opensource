@@ -317,13 +317,26 @@ final class RecorderViewModel: ObservableObject {
             // Use speech duration as the effective duration for VAD mode
             let duration = stats.speechDuration > 0 ? stats.speechDuration : stats.totalRecordingDuration
 
+            // Capture VAD metadata and time mappings for diarization
+            let originalDuration = stats.totalRecordingDuration
+            let speechDur = stats.speechDuration
+            let timeMappings = continuousRecorder.getTimeMappings()
+            let vadSegments = continuousRecorder.getSpeechSegments()
+
             self.continuousRecorder = nil
             self.isRecording = false
             self.isPaused = false
 
-            NSLog("RecorderViewModel: VAD recording stopped. Speech: \(stats.speechDuration)s, Total: \(stats.totalRecordingDuration)s, Segments: \(stats.segmentCount)")
+            NSLog("RecorderViewModel: VAD recording stopped. Speech: \(speechDur)s, Total: \(originalDuration)s, Segments: \(stats.segmentCount)")
 
-            processRecordedAudio(url: audioURL, duration: duration)
+            processRecordedAudio(
+                url: audioURL,
+                duration: duration,
+                originalDuration: originalDuration,
+                speechDuration: speechDur,
+                vadSegments: vadSegments,
+                timeMappings: timeMappings
+            )
         } catch {
             NSLog("RecorderViewModel: Failed to stop VAD recording: \(error)")
             self.continuousRecorder = nil
@@ -332,22 +345,41 @@ final class RecorderViewModel: ObservableObject {
         }
     }
 
-    private func processRecordedAudio(url audioURL: URL, duration: TimeInterval) {
+    private func processRecordedAudio(
+        url audioURL: URL,
+        duration: TimeInterval,
+        originalDuration: TimeInterval? = nil,
+        speechDuration: TimeInterval? = nil,
+        vadSegments: [SpeechSegment]? = nil,
+        timeMappings: [AudioSegmentManager.TimeMapping]? = nil
+    ) {
         // Immediately persist a placeholder note so the user never loses their recording
-        let placeholder = Note(createdAt: Date(), // Explicit Date()
-                               duration: duration,
-                               audioURL: audioURL,
-                               transcript: "",
-                               words: [])
+        var placeholder = Note(
+            createdAt: Date(),
+            duration: duration,
+            audioURL: audioURL,
+            transcript: "",
+            words: []
+        )
+
+        // Add VAD metadata if available
+        placeholder.originalRecordingDuration = originalDuration
+        placeholder.speechDuration = speechDuration
+        placeholder.vadSegments = vadSegments
+
         let placeholderID = placeholder.id
         store?.add(placeholder)
 
         isPreparingModel = true
 
+        // Capture time mappings for diarization
+        let capturedTimeMappings = timeMappings
+        let isVADMode = recordingMode == .vadFiltered
+
         // Run the heavy transcription work off the MainActor so that the UI
         // can update and show the "Preparing…" message while Core ML compiles
         // the encoder on first launch.
-        Task.detached(priority: .userInitiated) { [weak self, audioURL, duration, placeholderID] in
+        Task.detached(priority: .userInitiated) { [weak self, audioURL, duration, placeholderID, originalDuration, speechDuration, vadSegments, capturedTimeMappings, isVADMode] in
             guard let self else { return }
 
             await MainActor.run {
@@ -362,7 +394,6 @@ final class RecorderViewModel: ObservableObject {
                 // Assign to temporary local constants first
                 let (localTranscript, localWords) = try await WhisperEngine.shared.transcribe(audioFileURL: audioURL) { progress in
                     Task { @MainActor in
-                        // This closure only captures `self`
                         self.transcriptionProgress = progress
                     }
                 }
@@ -371,16 +402,10 @@ final class RecorderViewModel: ObservableObject {
                 words = localWords
             } catch WhisperError.transcriptionInterrupted {
                 NSLog("RecorderViewModel: Transcription was interrupted.")
-                // UI reset and user notification will be handled below
-                // transcript and words will remain empty or partially filled if desired
             } catch {
                 NSLog("RecorderViewModel: Transcription failed with error: \(error)")
-                // Handle other errors (e.g., model load, audio read)
-                // transcript and words will remain empty
             }
 
-            // WhisperEngine.shared.release() is now called internally by WhisperEngine's defer block
-            // await WhisperEngine.shared.release() // This call might be redundant now
             await Task.yield()
 
             // Capture transcript and words as immutable constants before passing to MainActor context
@@ -389,32 +414,45 @@ final class RecorderViewModel: ObservableObject {
 
             await MainActor.run {
                 self.isProcessing = false
-                self.isPreparingModel = false // Ensure this is also reset
+                self.isPreparingModel = false
 
                 if finalTranscript.isEmpty && finalWords.isEmpty {
-                    // Transcription likely failed or was interrupted significantly
-                    // Keep the placeholder or update with minimal info
-                    // Optionally, inform the user more directly here
-                    NSLog("RecorderViewModel: Transcription resulted in empty content. Placeholder remains or is minimally updated.")
-                    // Reset progress if it wasn't fully reset (e.g. error before loop start)
+                    NSLog("RecorderViewModel: Transcription resulted in empty content.")
                     self.transcriptionProgress = 0.0
-                    // Potentially remove the placeholder if it's truly unusable or notify user
-                    // For now, we'll let the placeholder be updated with empty transcript
                 }
 
-                let note = Note(id: placeholderID,
-                                createdAt: Date(), // Explicit Date(), ideally original placeholder's date
-                                duration: duration,
-                                audioURL: audioURL,
-                                transcript: finalTranscript, // Use captured constant
-                                words: finalWords)           // Use captured constant
-                self.finishedNote = note // This might trigger UI even if transcript is empty
+                var note = Note(
+                    id: placeholderID,
+                    createdAt: Date(),
+                    duration: duration,
+                    audioURL: audioURL,
+                    transcript: finalTranscript,
+                    words: finalWords
+                )
 
-                // Update the note in the persistent store (replace placeholder)
+                // Preserve VAD metadata
+                note.originalRecordingDuration = originalDuration
+                note.speechDuration = speechDuration
+                note.vadSegments = vadSegments
+
+                self.finishedNote = note
+
+                // Update the note in the persistent store
                 self.store?.update(note)
 
-                // LLM post-processing is no longer automatically triggered here.
-                // It should be triggered manually via manuallyRunPostProcessing(for:)
+                // Trigger diarization for VAD mode if we have words and time mappings
+                if isVADMode && !finalWords.isEmpty {
+                    NSLog("RecorderViewModel: Triggering diarization for VAD recording")
+                    if let store = self.store {
+                        enqueueFullDiarizationPipeline(
+                            for: note,
+                            in: store,
+                            timeMappings: capturedTimeMappings
+                        )
+                    }
+                }
+
+                // Standard mode notes still use manual post-processing trigger
             }
         }
     }

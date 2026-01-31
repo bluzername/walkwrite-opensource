@@ -6,6 +6,7 @@
 |---------|------|-------|-------------|
 | 1.0 | 2025-01-30 | Phase 1 | VAD-based continuous recording |
 | 2.0 | 2025-01-30 | Phase 2 | Speaker diarization complete |
+| 3.0 | 2025-01-31 | Phase 3 | User identification & LLM integration |
 
 ---
 
@@ -15,10 +16,11 @@
 2. [System Architecture](#system-architecture)
 3. [Phase 1: VAD Foundation](#phase-1-vad-foundation)
 4. [Phase 2: Speaker Diarization](#phase-2-speaker-diarization)
-5. [Data Flow](#data-flow)
-6. [Data Models](#data-models)
-7. [Component Reference](#component-reference)
-8. [Testing Strategy](#testing-strategy)
+5. [Phase 3: User Identification & LLM Integration](#phase-3-user-identification--llm-integration)
+6. [Data Flow](#data-flow)
+7. [Data Models](#data-models)
+8. [Component Reference](#component-reference)
+9. [Testing Strategy](#testing-strategy)
 
 ---
 
@@ -419,13 +421,17 @@ WalkWrite/
 │   ├── VADProtocol.swift            (286 lines)
 │   ├── EnergyBasedVAD.swift         (261 lines)
 │   ├── AudioSegmentManager.swift    (330 lines)
-│   └── ContinuousRecorder.swift     (496 lines)
-├── Diarization/                      # Phase 2
+│   └── ContinuousRecorder.swift     (500 lines)
+├── Diarization/                      # Phase 2 & 3
 │   ├── SpeakerEmbedding.swift       (485 lines) - Config, embedding, factory
 │   ├── SpeakerClusterer.swift       (382 lines) - AHC clustering
 │   ├── WordSpeakerAssigner.swift    (361 lines) - Word mapping, stats
-│   └── DiarizationPipeline.swift    (499 lines) - Orchestration, formatting
-├── RecorderViewModel.swift          (Modified) - Dual-mode support
+│   ├── DiarizationPipeline.swift    (499 lines) - Orchestration, formatting
+│   ├── UserIdentifier.swift         (340 lines) - User identification
+│   └── DiarizationProcessor.swift   (280 lines) - Pipeline integration
+├── Note.swift                        (Modified) - Diarization fields
+├── LLMEngine.swift                   (Modified) - Speaker-aware prompts
+├── RecorderViewModel.swift          (Modified) - Full pipeline integration
 └── RecorderSheet.swift              (Modified) - VAD UI components
 
 WalkWriteTests/
@@ -437,7 +443,194 @@ WalkWriteTests/
 ├── SpeakerEmbeddingTests.swift      # Phase 2 tests
 ├── SpeakerClustererTests.swift
 ├── WordSpeakerAssignerTests.swift
-└── Phase1And2IntegrationTests.swift # Cross-phase tests
+├── Phase1And2IntegrationTests.swift # Phase 1-2 integration
+├── UserIdentifierTests.swift        # Phase 3 tests
+└── Phase1To3IntegrationTests.swift  # Full pipeline tests
+```
+
+---
+
+## Phase 3: User Identification & LLM Integration
+
+### Overview
+
+Phase 3 completes the speaker-aware processing pipeline by:
+1. Identifying the most likely "user" (the person recording)
+2. Generating speaker labels and context
+3. Providing speaker-aware LLM prompts for better summaries
+
+### Components
+
+#### UserIdentifier.swift
+
+Identifies the user from diarization results using multiple signals.
+
+```swift
+// Configuration for user identification
+public struct UserIdentificationConfig: Codable, Sendable {
+    var minSpeakingTimeRatio: Float    // 0.2 default
+    var speakingTimeWeight: Float      // 0.5 weight
+    var segmentCountWeight: Float      // 0.3 weight
+    var firstAppearanceWeight: Float   // 0.2 weight
+    var minConfidence: Float           // 0.3 minimum
+
+    static let `default`, conservative, lenient: UserIdentificationConfig
+}
+
+// User identification result
+public struct UserIdentificationResult: Codable, Sendable {
+    let userId: Int
+    let confidence: Float
+    let reason: IdentificationReason
+    let userStats: SpeakerStats
+}
+
+// Main identifier class
+public final class UserIdentifier: Sendable {
+    func identifyUser(
+        diarizedWords: [DiarizedWord],
+        speakerStats: [SpeakerStats],
+        speakerSegments: [SpeakerSegment]?
+    ) -> UserIdentificationResult?
+}
+```
+
+#### SpeakerLabeler
+
+Utility for generating speaker labels and LLM context.
+
+```swift
+public enum SpeakerLabeler {
+    // Generate labels: { 0: "You", 1: "Speaker 2", ... }
+    static func generateLabels(
+        speakerStats: [SpeakerStats],
+        userId: Int?,
+        customUserLabel: String = "You"
+    ) -> [Int: String]
+
+    // Format transcript with speaker labels
+    static func formatTranscript(
+        diarizedWords: [DiarizedWord],
+        speakerStats: [SpeakerStats],
+        userId: Int?
+    ) -> String
+
+    // Generate LLM context describing speakers
+    static func generateLLMContext(
+        speakerStats: [SpeakerStats],
+        userId: Int?
+    ) -> String
+}
+```
+
+#### DiarizationProcessor.swift
+
+Orchestrates the full diarization and enhancement pipeline.
+
+```swift
+// Run diarization only
+public func enqueueDiarization(
+    for note: Note,
+    in store: NoteStore,
+    timeMappings: [AudioSegmentManager.TimeMapping]?
+)
+
+// Run speaker-aware LLM enhancement
+public func enqueueSpeakerAwareEnhancement(
+    for note: Note,
+    in store: NoteStore
+)
+
+// Run complete pipeline: diarization → user ID → enhancement
+public func enqueueFullDiarizationPipeline(
+    for note: Note,
+    in store: NoteStore,
+    timeMappings: [AudioSegmentManager.TimeMapping]?
+)
+```
+
+### LLM Engine Updates
+
+Speaker-aware prompts for multi-speaker transcripts:
+
+```swift
+extension LLMEngine {
+    // Clean diarized transcript preserving speaker labels
+    func cleanedDiarizedTranscript(
+        from transcript: String,
+        speakerContext: String
+    ) async throws -> String
+
+    // Generate speaker-aware summary
+    func speakerAwareSummary(
+        for transcript: String,
+        speakerContext: String
+    ) async throws -> String
+
+    // Extract speaker-aware key ideas
+    func speakerAwareKeyIdeas(
+        for transcript: String,
+        speakerContext: String
+    ) async throws -> [String]
+
+    // Extract action items from conversation
+    func extractActionItems(
+        from transcript: String,
+        speakerContext: String
+    ) async throws -> [String]
+}
+```
+
+### User Identification Algorithm
+
+1. **Score Calculation**
+   - Speaking time score (normalized to max)
+   - Segment count score (normalized to max)
+   - First appearance score (earlier = higher)
+
+2. **Weighted Combination**
+   ```
+   score = speakingTime × 0.5 + segments × 0.3 + firstAppearance × 0.2
+   ```
+
+3. **Confidence Calculation**
+   - Base confidence from score
+   - Boosted if clear winner (gap > 0.2)
+   - Reduced if scores are close (gap < 0.05)
+   - 1.0 for single speaker
+
+4. **Reason Assignment**
+   - `.singleSpeaker` - Only one speaker
+   - `.mostSpeakingTime` - Dominant speaker (>50%)
+   - `.firstSpeakerWithSubstantialTime` - First + >25% time
+   - `.mostSegments` - Most active speaker
+   - `.combinedFactors` - Multiple signals
+
+### Note Model Extensions
+
+```swift
+extension Note {
+    // Phase 1: VAD metadata
+    var originalRecordingDuration: TimeInterval?
+    var speechDuration: TimeInterval?
+    var vadSegments: [SpeechSegment]?
+
+    // Phase 2/3: Diarization data
+    var diarizedWords: [DiarizedWord]?
+    var speakerSegments: [SpeakerSegment]?
+    var speakerStats: [SpeakerStats]?
+    var speakerCount: Int?
+    var identifiedUserId: Int?
+    var diarizedCleanedTranscript: String?
+    var speakerAwareSummary: String?
+    var diarizationCompleted: Bool?
+    var diarizationFailed: Bool?
+
+    // Convenience properties
+    var hasDiarization: Bool
+    var hasMultipleSpeakers: Bool
+    var formattedTranscript: String
+}
 ```
 
 ---
@@ -609,6 +802,29 @@ struct Note: Identifiable, Codable {
 | DiarizationPipeline | DiarizationPipeline.swift | 310 | Orchestrates full pipeline |
 | DiarizedTranscriptFormatter | DiarizationPipeline.swift | 100 | Formats diarized output |
 
+### Phase 3 Components
+
+| Component | File | Lines | Purpose |
+|-----------|------|-------|---------|
+| UserIdentificationConfig | UserIdentifier.swift | 60 | User ID algorithm settings |
+| UserIdentificationResult | UserIdentifier.swift | 30 | Result with userId and confidence |
+| IdentificationReason | UserIdentifier.swift | 30 | Enum explaining why user was identified |
+| UserIdentifier | UserIdentifier.swift | 200 | Identifies user from diarization |
+| SpeakerLabeler | UserIdentifier.swift | 120 | Generates labels and LLM context |
+| DiarizationProcessTracker | DiarizationProcessor.swift | 25 | Prevents duplicate processing |
+| enqueueDiarization | DiarizationProcessor.swift | 80 | Async diarization processing |
+| enqueueSpeakerAwareEnhancement | DiarizationProcessor.swift | 60 | Speaker-aware LLM enhancement |
+| enqueueFullDiarizationPipeline | DiarizationProcessor.swift | 100 | Complete pipeline orchestration |
+
+### LLM Engine Extensions (Phase 3)
+
+| Method | Purpose |
+|--------|---------|
+| cleanedDiarizedTranscript | Clean transcript preserving speaker labels |
+| speakerAwareSummary | Summary with speaker context |
+| speakerAwareKeyIdeas | Key ideas attributed to speakers |
+| extractActionItems | Extract action items from conversation |
+
 ---
 
 ## Testing Strategy
@@ -639,11 +855,23 @@ struct Note: Identifiable, Codable {
 | WordSpeakerAssignerTests | 18 | Word assignment, smoothing, relabeling |
 | Phase1And2IntegrationTests | 9 | VAD → Diarization pipeline integration |
 
+### Phase 3 Tests
+
+| Test File | Tests | Purpose |
+|-----------|-------|---------|
+| UserIdentifierTests | 15 | User identification accuracy |
+| SpeakerLabelerTests | 6 | Label generation, transcript formatting |
+| UserIdentificationConfigTests | 5 | Configuration validation |
+| UserIdentificationResultTests | 3 | Result structure tests |
+| Phase1To3IntegrationTests | 8 | Full VAD → Diarization → User ID pipeline |
+| NoteExtensionTests | 3 | Note model convenience properties |
+
 ### Test Data
 
 - Synthetic audio with known characteristics
-- Multi-speaker test scenarios
+- Multi-speaker test scenarios (2, 3+ speakers)
 - Edge cases (single speaker, many speakers, overlapping speech)
+- User identification scenarios (clear winner, close scores, insufficient time)
 
 ---
 

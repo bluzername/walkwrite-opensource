@@ -257,4 +257,150 @@ public final class LLMEngine { // Made public
         return []
 #endif
     }
+
+    // MARK: – Speaker-Aware APIs (Phase 3)
+
+    /// Clean a diarized transcript, preserving speaker labels
+    /// - Parameters:
+    ///   - transcript: The diarized transcript with speaker labels
+    ///   - speakerContext: Context about the speakers (from SpeakerLabeler.generateLLMContext)
+    /// - Returns: Cleaned transcript with speaker labels preserved
+    public func cleanedDiarizedTranscript(from transcript: String, speakerContext: String) async throws -> String {
+#if canImport(MLXLLM)
+        let prompt = """
+        You are a helpful writing assistant. The user will give you a voice-note transcript with multiple speakers.
+
+        \(speakerContext)
+
+        Rewrite the transcript by:
+        1. Correcting grammar, punctuation and typos
+        2. Removing filler words such as 'um', 'uh', and 'you know'
+        3. PRESERVING the speaker labels exactly as they appear (e.g., [You]:, [Speaker 2]:)
+        4. NOT changing the speakers' meaning or tone
+
+        Return only the cleaned transcript with speaker labels, no extra commentary.
+
+        Transcript:
+        \(transcript)
+
+        Cleaned transcript:
+        """
+        return try await run(prompt: prompt, maxTokens: 1024)
+#else
+        return transcript
+#endif
+    }
+
+    /// Generate a speaker-aware summary
+    /// - Parameters:
+    ///   - transcript: The diarized transcript with speaker labels
+    ///   - speakerContext: Context about the speakers
+    /// - Returns: Summary that incorporates speaker perspectives
+    public func speakerAwareSummary(for transcript: String, speakerContext: String) async throws -> String {
+#if canImport(MLXLLM)
+        let prompt = """
+        Summarise the following multi-speaker voice-note transcript in 3-5 sentences.
+
+        \(speakerContext)
+
+        Focus on:
+        1. The main topics discussed
+        2. Key points made by each speaker
+        3. Any decisions, action items, or conclusions reached
+        4. The overall context from the recording user's perspective
+
+        Transcript:
+        \(transcript)
+
+        Summary:
+        """
+        return try await run(prompt: prompt, maxTokens: 300)
+#else
+        return ""
+#endif
+    }
+
+    /// Generate speaker-aware key ideas
+    /// - Parameters:
+    ///   - transcript: The diarized transcript with speaker labels
+    ///   - speakerContext: Context about the speakers
+    /// - Returns: Key ideas attributed to speakers where relevant
+    public func speakerAwareKeyIdeas(for transcript: String, speakerContext: String) async throws -> [String] {
+#if canImport(MLXLLM)
+        let prompt = """
+        Identify the key ideas from the following multi-speaker voice-note transcript.
+
+        \(speakerContext)
+
+        Return them as a bulleted list, one idea per line, at most 10 bullets.
+        For each idea:
+        - Briefly state the idea
+        - Attribute it to the speaker(s) who raised it when relevant
+        - Add one sentence of elaboration
+
+        Transcript:
+        \(transcript)
+
+        Key ideas:
+        -
+        """
+        let raw = try await run(prompt: prompt, maxTokens: 350)
+        let bullets = raw
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { line in
+                line.trimmingCharacters(in: CharacterSet(charactersIn: "-•").union(.whitespacesAndNewlines))
+            }
+        return bullets
+#else
+        return []
+#endif
+    }
+
+    /// Analyze a conversation for action items and follow-ups
+    /// - Parameters:
+    ///   - transcript: The diarized transcript
+    ///   - speakerContext: Context about the speakers
+    /// - Returns: List of action items with assigned speakers
+    public func extractActionItems(from transcript: String, speakerContext: String) async throws -> [String] {
+#if canImport(MLXLLM)
+        let prompt = """
+        Review the following multi-speaker conversation and extract any action items, tasks, or commitments.
+
+        \(speakerContext)
+
+        For each action item:
+        - State what needs to be done
+        - Note who is responsible (if mentioned)
+        - Include any deadlines or timeframes mentioned
+
+        If no clear action items exist, return "No specific action items identified."
+
+        Transcript:
+        \(transcript)
+
+        Action items:
+        -
+        """
+        let raw = try await run(prompt: prompt, maxTokens: 256)
+
+        // Handle "no action items" case
+        if raw.lowercased().contains("no specific action items") ||
+           raw.lowercased().contains("no action items") {
+            return []
+        }
+
+        let bullets = raw
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { line in
+                line.trimmingCharacters(in: CharacterSet(charactersIn: "-•").union(.whitespacesAndNewlines))
+            }
+        return bullets
+#else
+        return []
+#endif
+    }
 }
