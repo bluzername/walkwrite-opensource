@@ -1012,11 +1012,32 @@ struct Note: Identifiable, Codable {
 | Phase1To3IntegrationTests | 8 | Full VAD → Diarization → User ID pipeline |
 | NoteExtensionTests | 3 | Note model convenience properties |
 
+### Phase 4/5 Tests
+
+| Test File | Tests | Purpose |
+|-----------|-------|---------|
+| DiarizationSettingsTests | 10 | Settings persistence, validation |
+| SpeakerColorsTests | 4 | Color palette consistency |
+| FullPipelineTests | 12 | End-to-end edge cases |
+| PerformanceTests | 5 | Performance benchmarks |
+
 ### Test Data
 
 - Synthetic audio with known characteristics
 - Multi-speaker test scenarios (2, 3+ speakers)
 - Edge cases (single speaker, many speakers, overlapping speech)
+- User identification scenarios (clear winner, close scores, insufficient time)
+- Performance scenarios (long recordings, many speakers)
+
+### Performance Benchmarks
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| VAD frame processing | < 5ms per frame | `testVADFrameProcessingPerformance` |
+| Embedding extraction | < 100ms per segment | `testEmbeddingExtractionPerformance` |
+| Clustering | < 1s for 50 embeddings | `testClusteringPerformance` |
+| Word assignment | < 50ms for 500 words | `testWordAssignmentPerformance` |
+| User identification | < 10ms for 1000 words | `testUserIdentificationPerformance` |
 - User identification scenarios (clear winner, close scores, insufficient time)
 
 ---
