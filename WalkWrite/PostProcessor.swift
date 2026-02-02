@@ -114,9 +114,13 @@ public func enqueueEnhancement(for note: Note, in store: NoteStore) { // Made pu
         }
 
         // Run serially to minimise peak memory usage.
+        // Uses UnifiedLLM which automatically picks the best backend:
+        // 1. Apple Foundation Models (iOS 18.4+) - zero app size impact
+        // 2. MLX (if compiled in) - requires bundled model
+        // 3. Passthrough (if nothing available)
         do {
             NSLog("LLM Enhancement starting cleanedTranscript for note \(note.id)")
-            let cleaned = try await LLMEngine.shared.cleanedTranscript(from: note.transcript)
+            let cleaned = try await UnifiedLLM.cleanedTranscript(from: note.transcript)
 
             NSLog("LLM Enhancement completed cleanedTranscript for note \(note.id)")
             if let store {
@@ -130,7 +134,7 @@ public func enqueueEnhancement(for note: Note, in store: NoteStore) { // Made pu
             }
 
             NSLog("LLM Enhancement starting summary for note \(note.id)")
-            let summary = try await LLMEngine.shared.summary(for: cleaned)
+            let summary = try await UnifiedLLM.summary(for: cleaned)
             NSLog("LLM Enhancement completed summary for note \(note.id)")
 
             if let store {
@@ -144,7 +148,7 @@ public func enqueueEnhancement(for note: Note, in store: NoteStore) { // Made pu
             }
 
             NSLog("LLM Enhancement starting keyIdeas for note \(note.id)")
-            let ideas = try await LLMEngine.shared.keyIdeas(for: cleaned)
+            let ideas = try await UnifiedLLM.keyIdeas(for: cleaned)
             NSLog("LLM Enhancement completed keyIdeas for note \(note.id)")
 
             if let store {
@@ -158,10 +162,12 @@ public func enqueueEnhancement(for note: Note, in store: NoteStore) { // Made pu
                 }
             }
 
-            // Free MLX buffers / weights ASAP.
+            // Free MLX buffers / weights ASAP (only if MLX was used).
+            #if canImport(MLXLLM)
             NSLog("LLM Enhancement unloading LLMEngine for note \(note.id)")
             await LLMEngine.shared.unload()
             NSLog("LLM Enhancement LLMEngine unloaded for note \(note.id)")
+            #endif
 
         } catch {
             NSLog("LLM pipeline failed for note \(note.id): \(error)")
